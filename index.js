@@ -10,7 +10,7 @@ const client = new Client({
   ],
 });
 
-// Get favorite stocks from .env (comma-separated, e.g. "GP,UPGDCL,BSCCL")
+// Favorite stocks from .env (comma-separated)
 const favoriteTickers = process.env.FAVORITE_STOCKS
   ? process.env.FAVORITE_STOCKS.split(',').map(s => s.trim().toUpperCase())
   : [];
@@ -32,14 +32,18 @@ async function fetchTopMovers() {
 
 function formatStockMessage(stocks, title, emoji) {
   if (stocks.length === 0) return `⚠️ No ${title.toLowerCase()} data available.`;
-  
-  return `**${emoji} ${title}**\n` + stocks.map(s =>
-    `📈 **${s.Scrip}**\n` +
-    `Price: ${s.LTP} BDT\n` +
-    `Change: ${s.ChangePer?.toFixed(2) ?? 'N/A'}%\n` +
-    `Volume: ${s.Volume ?? 'N/A'}\n` +
-    `------------------------`
-  ).join('\n');
+
+  const header = `╭─ ${emoji} **${title}** ─────────────────────`;
+  const footer = `╰──────────────────────────────`;
+
+  const lines = stocks.map(s =>
+    `• **${s.Scrip}**\n` +
+    `  ├ 💰 Price: \`${s.LTP} BDT\`\n` +
+    `  ├ 📊 Change: \`${s.ChangePer?.toFixed(2) ?? 'N/A'}%\`\n` +
+    `  └ 📦 Volume: \`${s.Volume ?? 'N/A'}\``
+  );
+
+  return [header, ...lines, footer].join('\n');
 }
 
 function filterFavoriteStocks(allStocks) {
@@ -51,7 +55,16 @@ async function postStockUpdate() {
   const favorites = filterFavoriteStocks(allStocks);
   const channel = await client.channels.fetch(process.env.CHANNEL_ID);
 
+  const now = new Date().toLocaleTimeString('en-BD', {
+    timeZone: 'Asia/Dhaka',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true,
+  });
+
   const message = [
+    `🕒 **Updated at:** ${now} (BST)`,
     formatStockMessage(gainers, "Top Gainers", "🚀"),
     formatStockMessage(losers, "Top Losers", "📉"),
     formatStockMessage(favorites, "Favorite Stocks", "⭐")
@@ -63,7 +76,7 @@ async function postStockUpdate() {
 client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   postStockUpdate(); // initial message
-  setInterval(postStockUpdate, 60 * 1000); // every 20 seconds
+  setInterval(postStockUpdate, 20 * 1000); // every 20 seconds
 });
 
 client.login(process.env.DISCORD_TOKEN);
