@@ -63,7 +63,7 @@ async function postStockUpdate() {
 client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   postStockUpdate(); // initial message
-  setInterval(postStockUpdate, 20 * 1000); // every 20 seconds
+  setInterval(postStockUpdate, 60 * 1000); // every 20 seconds
 });
 
 client.login(process.env.DISCORD_TOKEN);
