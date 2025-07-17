@@ -1,14 +1,14 @@
 {
   "name": "discord-stock-bot",
   "version": "1.0.0",
-  "description": "Discord bot that posts Bangladesh stock market updates from AmarStock.com",
+  "description": "Discord bot for Bangladesh stock updates + AI suggestions",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "type": "commonjs",
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "discord.js": "^14.11.0",
     "dotenv": "^16.4.5",
-    "node-fetch": "^2.6.11"
+    "node-fetch": "^2.6.11",
+    "openai": "^4.33.0"
   }
 }
