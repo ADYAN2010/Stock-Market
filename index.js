@@ -1,6 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
-import { Client, GatewayIntentBits, Events } from "discord.js";
+import { Client, GatewayIntentBits, Events, REST, Routes, SlashCommandBuilder } from "discord.js";
 import OpenAI from "openai";
 import dotenv from "dotenv";
 import cors from "cors";
@@ -13,81 +13,125 @@ app.use(express.json());
 
 const port = process.env.PORT || 3000;
 const discordToken = process.env.DISCORD_TOKEN;
+const clientId = process.env.CLIENT_ID;
 const suggestionChannel = process.env.SUGGESTION_CHANNEL_ID;
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Express test route
+// Express routes
 app.get("/", (req, res) => {
   res.send("Bot is running!");
 });
 
-// API route to get top movers
-app.get("/api/stocks", async (req, res) => {
-  try {
-    const data = await fetchTopMovers();
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch stock data" });
-  }
-});
-
-// API to get AI suggestions
-app.post("/api/suggestion", async (req, res) => {
-  const { input } = req.body;
-  try {
-    const suggestion = await generateAISuggestions(input);
-    res.json({ suggestion });
-  } catch (error) {
-    res.status(500).json({ error: "Failed to generate suggestion" });
-  }
-});
-
-// Start Express
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`🌐 Express server running on port ${port}`);
 });
 
-// DISCORD BOT STUFF
-
+// Discord client
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
+// Slash commands
+const commands = [
+  new SlashCommandBuilder().setName("gainers").setDescription("Show top gainers from DSE"),
+  new SlashCommandBuilder().setName("losers").setDescription("Show top losers from DSE"),
+  new SlashCommandBuilder().setName("stocks").setDescription("Show both top gainers and losers"),
+  new SlashCommandBuilder()
+    .setName("suggest")
+    .setDescription("Get AI stock suggestion")
+    .addStringOption(option =>
+      option.setName("input").setDescription("Your question").setRequired(true)
+    ),
+].map(cmd => cmd.toJSON());
+
+const rest = new REST({ version: "10" }).setToken(discordToken);
+(async () => {
+  try {
+    console.log("📥 Registering slash commands...");
+    await rest.put(Routes.applicationCommands(clientId), { body: commands });
+    console.log("✅ Slash commands registered!");
+  } catch (err) {
+    console.error("Slash command error:", err);
+  }
+})();
+
+// Event: Bot ready
 client.once(Events.ClientReady, () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
 });
 
+// Event: Handle messages (prefix commands)
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  if (message.content === "!gainers") {
-    const { gainers } = await fetchTopMovers();
-    const reply = gainers
-      .map(g => `📈 ${g.Scrip} – ${g.LTP} BDT (${g.ChangePer.toFixed(2)}%)`)
-      .join("\n");
+  const content = message.content.toLowerCase();
 
-    message.channel.send(`Top Gainers Today:\n${reply}`);
+  if (content === "!gainers") {
+    const { gainers } = await fetchTopMovers();
+    const reply = gainers.map(g => `📈 ${g.Scrip} – ${g.LTP} BDT (${g.ChangePer.toFixed(2)}%)`).join("\n");
+    message.channel.send(`**Top Gainers Today:**\n${reply}`);
+  }
+
+  if (content === "!losers") {
+    const { losers } = await fetchTopMovers();
+    const reply = losers.map(l => `📉 ${l.Scrip} – ${l.LTP} BDT (${l.ChangePer.toFixed(2)}%)`).join("\n");
+    message.channel.send(`**Top Losers Today:**\n${reply}`);
+  }
+
+  if (content === "!stocks") {
+    const { gainers, losers } = await fetchTopMovers();
+    const reply = `🚀 **Top Gainers:**\n${gainers.map(g => `📈 ${g.Scrip} – ${g.LTP} (${g.ChangePer.toFixed(2)}%)`).join("\n")}\n\n📉 **Top Losers:**\n${losers.map(l => `📉 ${l.Scrip} – ${l.LTP} (${l.ChangePer.toFixed(2)}%)`).join("\n")}`;
+    message.channel.send(reply);
   }
 
   if (message.channel.id === suggestionChannel) {
     const suggestion = await generateAISuggestions(message.content);
-    message.reply(`🤖 AI Suggestion:\n${suggestion}`);
+    message.reply(`💡 AI Suggestion:\n${suggestion}`);
+  }
+});
+
+// Event: Slash command interaction
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName } = interaction;
+
+  if (commandName === "gainers") {
+    const { gainers } = await fetchTopMovers();
+    const reply = gainers.map(g => `📈 ${g.Scrip} – ${g.LTP} BDT (${g.ChangePer.toFixed(2)}%)`).join("\n");
+    await interaction.reply(`**🚀 Top Gainers Today:**\n${reply}`);
+  }
+
+  if (commandName === "losers") {
+    const { losers } = await fetchTopMovers();
+    const reply = losers.map(l => `📉 ${l.Scrip} – ${l.LTP} BDT (${l.ChangePer.toFixed(2)}%)`).join("\n");
+    await interaction.reply(`**📉 Top Losers Today:**\n${reply}`);
+  }
+
+  if (commandName === "stocks") {
+    const { gainers, losers } = await fetchTopMovers();
+    const reply = `🚀 **Top Gainers:**\n${gainers.map(g => `📈 ${g.Scrip} – ${g.LTP} (${g.ChangePer.toFixed(2)}%)`).join("\n")}\n\n📉 **Top Losers:**\n${losers.map(l => `📉 ${l.Scrip} – ${l.LTP} (${l.ChangePer.toFixed(2)}%)`).join("\n")}`;
+    await interaction.reply(reply);
+  }
+
+  if (commandName === "suggest") {
+    const input = interaction.options.getString("input");
+    const suggestion = await generateAISuggestions(input);
+    await interaction.reply(`💡 AI Suggestion:\n${suggestion}`);
   }
 });
 
 client.login(discordToken);
 
-// Fetch stock data
+// Stock Fetch
 async function fetchTopMovers() {
   const res = await fetch("https://www.dse.com.bd/latest_share_price_scroll_l.php");
   const html = await res.text();
 
-  const gainers = [];
-  const losers = [];
-
+  const gainers = [], losers = [];
   const rows = html.split("<tr>").slice(2);
   for (let r of rows) {
     const cols = r.split("<td").map(col => col.replace(/<[^>]+>/g, "").trim());
@@ -104,8 +148,8 @@ async function fetchTopMovers() {
   losers.sort((a, b) => a.ChangePer - b.ChangePer);
 
   return {
-    gainers: gainers.slice(0, 5),
-    losers: losers.slice(0, 5),
+    gainers: gainers.slice(0, 10),
+    losers: losers.slice(0, 10),
   };
 }
 
