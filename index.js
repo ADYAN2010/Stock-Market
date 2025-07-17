@@ -1,6 +1,7 @@
 require('dotenv').config();
 const fetch = require('node-fetch');
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType } = require('discord.js');
+const { Configuration, OpenAIApi } = require('openai');
 
 const client = new Client({
   intents: [
@@ -10,144 +11,124 @@ const client = new Client({
   ],
 });
 
-const favoriteTickers = process.env.FAVORITE_STOCKS
-  ? process.env.FAVORITE_STOCKS.split(',').map(s => s.trim().toUpperCase())
-  : [];
+const openai = new OpenAIApi(new Configuration({ apiKey: process.env.OPENAI_API_KEY }));
+const favoriteTickers = process.env.FAVORITE_STOCKS?.split(',').map(s => s.trim().toUpperCase()) || [];
 
 async function fetchTopMovers() {
   try {
     const res = await fetch('https://www.amarstock.com/api/feed/index/move');
     const data = await res.json();
-    return {
-      gainers: data.pos.slice(0, 10),
-      losers: data.neg.slice(0, 10),
-      allStocks: [...data.pos, ...data.neg],
-    };
+    return { gainers: data.pos.slice(0,10), losers: data.neg.slice(0,10), allStocks: [...data.pos, ...data.neg] };
   } catch (err) {
-    console.error("❌ Error fetching stock data:", err);
+    console.error("❌ fetchTopMovers error:", err);
     return { gainers: [], losers: [], allStocks: [] };
   }
 }
 
-function formatStockMessage(stocks, title, emoji) {
-  if (stocks.length === 0) return `⚠️ No ${title.toLowerCase()} data available.`;
+async function fetchStockDetails(ticker) {
+  try {
+    const res = await fetch(`https://www.amarstock.com/data/company/${ticker}`);
+    if(!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.error(`❌ fetchStockDetails(${ticker}) error:`, err);
+    return null;
+  }
+}
 
-  const header = `╭─ ${emoji} **${title}** ─────────────────────`;
-  const footer = `╰──────────────────────────────`;
-
+function formatMainStock(stocks, title, emoji) {
+  if (!stocks.length) return `⚠️ No ${title.toLowerCase()} data.`;
+  const header = `╭─ ${emoji} **${title}** ──────────────`;
+  const footer = `╰────────────────────────`;
   const lines = stocks.map(s =>
-    `• **${s.Scrip}**\n` +
-    `  ├ 💰 Price: \`${s.LTP} BDT\`\n` +
-    `  ├ 📊 Change: \`${s.ChangePer?.toFixed(2) ?? 'N/A'}%\`\n` +
-    `  └ 📦 Volume: \`${s.Volume ?? 'N/A'}\``
+    `• **${s.Scrip}** — ${s.LTP} BDT (${s.ChangePer?.toFixed(2) ?? 'N/A'}%) Vol: ${s.Volume ?? 'N/A'}`
   );
-
   return [header, ...lines, footer].join('\n');
 }
 
-function filterFavoriteStocks(allStocks) {
-  return allStocks.filter(s => favoriteTickers.includes(s.Scrip.toUpperCase()));
+function formatDetailedStock(stock) {
+  if (!stock) return "⚠️ Stock not found.";
+  const mcap = (Number(stock.MarketCapitalization) / 1e9).toFixed(2);
+  return `📌 **${stock.CompanyName} (${stock.Scrip})**
+• Price – ${stock.LastTradePrice} BDT  
+• Open/Close – ${stock.OpenPrice} / ${stock.ClosePrice}  
+• High/Low – ${stock.High} / ${stock.Low}  
+• Volume – ${stock.Volume}  
+• Market Cap – ${mcap} B BDT  
+
+• P/E Ratio – ${stock.PE}  
+• EPS – ${stock.EPS}  
+• Dividend Yield – ${stock.DividendYield}%  
+• Beta – ${stock.Beta}`;
 }
 
-// 🔮 Basic AI Suggestion Generator
-function generateAISuggestions(gainers, losers) {
-  let suggestions = [];
-
-  gainers.forEach(stock => {
-    if (stock.ChangePer > 4) {
-      suggestions.push(`📈 **${stock.Scrip}** is rising fast (+${stock.ChangePer.toFixed(2)}%). Might be worth keeping an eye on!`);
-    }
-  });
-
-  losers.forEach(stock => {
-    if (stock.ChangePer < -4) {
-      suggestions.push(`⚠️ **${stock.Scrip}** is dropping significantly (${stock.ChangePer.toFixed(2)}%). Consider avoiding or watching closely.`);
-    }
-  });
-
-  if (suggestions.length === 0) {
-    suggestions.push("🤖 No strong movements detected right now. Market's pretty chill.");
+async function generateAISuggestions(text) {
+  try {
+    const resp = await openai.createChatCompletion({
+      model: "gpt-4",
+      messages: [
+        { role:"system", content:"You are a helpful Bangladeshi stock advisor." },
+        { role:"user", content:text }
+      ],
+      temperature:0.7
+    });
+    return resp.data.choices[0].message.content;
+  } catch(err) {
+    console.error('❌ OpenAI error:', err);
+    return null;
   }
-
-  return `🧠 **AI Suggestions:**\n\n` + suggestions.join('\n');
 }
-
-const basicInfoSection = `🔑 **Basic Info You’ll See Everywhere**
-• **Stock Name & Symbol** – The company name and its short code (e.g., Apple = AAPL).
-• **Price** – Current market price per share.
-• **Open/Close Price** – The price at the start/end of the trading day.
-• **High/Low (Day)** – Highest and lowest prices during the day.
-• **Volume** – Number of shares traded during the day.
-• **Market Cap** – Total value of the company’s shares.
-• **52-Week High/Low** – The highest and lowest prices in the last year.
-
-📈 **Performance & Value Data**
-• **P/E Ratio** – Price vs earnings.
-• **EPS** – Profit per share.
-• **Dividend Yield** – Returns given to shareholders.
-• **Beta** – Volatility of the stock.
-
-📊 **Trading Info**
-• **Bid Price** – Max price buyers wanna pay.
-• **Ask Price** – Min price sellers wanna accept.
-• **Bid/Ask Volume** – How many shares buyers/sellers want.
-• **Order Book** – Live list of buy/sell orders.
-
-📉 **Charts & Trends**
-• **Candlestick Chart** – Shows price movement visually.
-• **Moving Averages (MA, EMA)** – Trend tracking tools.
-• **RSI, MACD** – Technical indicators used by traders.`;
 
 async function postStockUpdate() {
-  const { gainers, losers, allStocks } = await fetchTopMovers();
-  const favorites = filterFavoriteStocks(allStocks);
-
-  let updateChannel, suggestionChannel;
   try {
-    updateChannel = await client.channels.fetch(process.env.CHANNEL_ID);
-    const allChannels = await updateChannel.guild.channels.fetch();
-    suggestionChannel = allChannels.find(ch => ch.name.toLowerCase() === 'suggestion');
-  } catch (e) {
-    console.error("❌ Failed to fetch channels:", e);
-    return;
-  }
+    const { gainers, losers, allStocks } = await fetchTopMovers();
+    const favorites = allStocks.filter(s => favoriteTickers.includes(s.Scrip.toUpperCase()));
+    const updateCh = await client.channels.fetch(process.env.CHANNEL_ID);
+    const suggCh = await client.channels.fetch(process.env.SUGGESTION_CHANNEL_ID);
 
-  const now = new Date().toLocaleTimeString('en-BD', {
-    timeZone: 'Asia/Dhaka',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-  });
+    const now = new Date().toLocaleTimeString('en-BD', { timeZone:'Asia/Dhaka', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:true });
+    await updateCh.send(`🕒 **Updated at:** ${now}`);
+    await updateCh.send(formatMainStock(gainers,"Top Gainers","🚀"));
+    await updateCh.send(formatMainStock(losers,"Top Losers","📉"));
+    await updateCh.send(formatMainStock(favorites,"Favorite Stocks","⭐"));
 
-  const stockMessage = [
-    `🕒 **Updated at:** ${now} (BST)`,
-    formatStockMessage(gainers, "Top Gainers", "🚀"),
-    formatStockMessage(losers, "Top Losers", "📉"),
-    formatStockMessage(favorites, "Favorite Stocks", "⭐")
-  ].join('\n\n');
-
-  try {
-    await updateChannel.send(stockMessage);
-    await updateChannel.send(basicInfoSection);
-
-    if (suggestionChannel && suggestionChannel.isTextBased()) {
-      const suggestionMessage = generateAISuggestions(gainers, losers);
-      await suggestionChannel.send(suggestionMessage);
-    } else {
-      console.warn("⚠️ Suggestion channel not found or not text-based.");
+    if (suggCh.isTextBased()) {
+      const input = `Gainers:\n${gainers.map(g => `${g.Scrip} (${g.ChangePer.toFixed(2)}%)`).join(', ')}\nLosers:\n${losers.map(l => `${l.Scrip} (${l.ChangePer.toFixed(2)}%)`).join(', ')}\nSuggest 2 to buy and 2 to sell.`;
+      const ai = await generateAISuggestions(input);
+      await suggCh.send(`🤖 **AI Suggestions:**\n${ai || "⚠️ AI unavailable"}`);
     }
   } catch (e) {
-    console.error("❌ Failed to send message:", e);
+    console.error('❌ postStockUpdate error', e);
   }
 }
+
+client.on('messageCreate', async msg => {
+  if (msg.author.bot) return;
+
+  const [cmd, ticker] = msg.content.trim().split(/\s+/);
+  if (cmd === '!stock' && ticker) {
+    const data = await fetchStockDetails(ticker.toUpperCase());
+    const formatted = formatDetailedStock(data);
+    await msg.channel.send(formatted);
+
+    if (data) {
+      const input = `Here are details for ${ticker}:\n` + Object.entries(data).map(([k,v]) => `${k}: ${v}`).join(', ') + `\nShould I buy or sell?`;
+      const ai = await generateAISuggestions(input);
+      await msg.channel.send(`🤖 **AI Advice:**\n${ai || "⚠️ AI unavailable"}`);
+    }
+  }
+});
 
 client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  postStockUpdate(); // Initial post
-  setInterval(postStockUpdate, 300000); // Every 5 mins
+  postStockUpdate();
+  setInterval(postStockUpdate, 300000);
 });
 
-
+if (!process.env.DISCORD_TOKEN || !process.env.CHANNEL_ID ||
+    !process.env.SUGGESTION_CHANNEL_ID || !process.env.OPENAI_API_KEY) {
+  console.error("❌ Missing required .env variables");
+  process.exit(1);
+}
 
 client.login(process.env.DISCORD_TOKEN);
