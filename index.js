@@ -1,175 +1,145 @@
 require('dotenv').config();
-const fetch = require('node-fetch');
 const { Client, GatewayIntentBits } = require('discord.js');
-const OpenAI = require('openai');
+const axios = require('axios');
+const { Configuration, OpenAIApi } = require('openai');
+const express = require('express');
 
-// Setup Discord and OpenAI clients
+// Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
-  ],
+  ]
 });
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Load environment variables
+const {
+  DISCORD_TOKEN,
+  OPENAI_API_KEY,
+  CHANNEL_ID,
+  SUGGESTION_CHANNEL_ID,
+  EMERGENCY_CHANNEL_ID,
+  FAVORITE_STOCKS,
+  GROWTH_ALERT_THRESHOLD
+} = process.env;
 
-const favoriteTickers = process.env.FAVORITE_STOCKS
-  ? process.env.FAVORITE_STOCKS.split(',').map(s => s.trim().toUpperCase())
-  : [];
+const favoriteStocks = FAVORITE_STOCKS.split(',');
+const threshold = parseFloat(GROWTH_ALERT_THRESHOLD || '5');
 
-async function fetchTopMovers() {
-  try {
-    const res = await fetch('https://www.amarstock.com/api/feed/index/move');
-    const data = await res.json();
-    return {
-      gainers: data.pos.slice(0, 10),
-      losers: data.neg.slice(0, 10),
-      allStocks: [...data.pos, ...data.neg],
-    };
-  } catch (err) {
-    console.error("❌ Error fetching stock data:", err);
-    return { gainers: [], losers: [], allStocks: [] };
-  }
-}
+// OpenAI setup
+const openai = new OpenAIApi(
+  new Configuration({ apiKey: OPENAI_API_KEY })
+);
 
-function formatStockMessage(stocks, title, emoji) {
-  if (stocks.length === 0) return `⚠️ No ${title.toLowerCase()} data available.`;
-  const header = `╭─ ${emoji} **${title}** ───────────────`;
-  const footer = `╰────────────────────────────`;
-  const lines = stocks.map(s =>
-    `• **${s.Scrip}**\n` +
-    `  ├ 💰 Price: \`${s.LTP} BDT\`\n` +
-    `  ├ 📊 Change: \`${s.ChangePer?.toFixed(2) ?? 'N/A'}%\`\n` +
-    `  └ 📦 Volume: \`${s.Volume ?? 'N/A'}\``
-  );
-  return [header, ...lines, footer].join('\n');
-}
+// Express server for Render port binding
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => {
+  res.send('✅ Stock bot is running!');
+});
+app.listen(PORT, () => {
+  console.log(`🌐 Server listening on port ${PORT}`);
+});
 
-function filterFavoriteStocks(allStocks) {
-  return allStocks.filter(s => favoriteTickers.includes(s.Scrip.toUpperCase()));
-}
-
-function generateAISuggestions(gainers, losers) {
-  let suggestions = [];
-  gainers.forEach(stock => {
-    if (stock.ChangePer > 4) {
-      suggestions.push(`📈 **${stock.Scrip}** is rising fast (+${stock.ChangePer.toFixed(2)}%). Might be worth watching!`);
-    }
-  });
-  losers.forEach(stock => {
-    if (stock.ChangePer < -4) {
-      suggestions.push(`⚠️ **${stock.Scrip}** is dropping hard (${stock.ChangePer.toFixed(2)}%). Use caution.`);
-    }
-  });
-  if (suggestions.length === 0) {
-    suggestions.push("🤖 No strong stock movements detected. The market's calm for now.");
-  }
-  return `🧠 **AI Suggestions:**\n\n${suggestions.join('\n')}`;
-}
-
+// Fetch stock details from TwelveData (or Amarstock if you swap URLs)
 async function fetchStockDetails(ticker) {
   try {
-    const res = await fetch(`https://www.amarstock.com/LatestPrice/${ticker.toUpperCase()}`);
-    if (!res.ok) throw new Error(`Ticker "${ticker}" not found.`);
-    const data = await res.json();
-    return data[0];
-  } catch (err) {
-    console.error("❌ Error fetching stock details:", err);
+    const res = await axios.get(`https://api.twelvedata.com/quote?symbol=${ticker}&apikey=demo`);
+    if (res.data.code || !res.data.price) throw new Error("Invalid ticker");
+    return res.data;
+  } catch (e) {
+    console.error(`❌ Error fetching ${ticker}:`, e.message);
     return null;
   }
 }
 
-function formatStockDetails(data) {
-  return (
-    `🔎 **Stock Info: ${data.Scrip}**\n` +
-    `• Price – \`${data.LTP} BDT\`\n` +
-    `• Open/Close – \`${data.Open} / ${data.Close}\`\n` +
-    `• High/Low (Day) – \`${data.High} / ${data.Low}\`\n` +
-    `• Volume – \`${data.Volume}\`\n` +
-    `• 52-Week High/Low – \`${data.WeekHigh} / ${data.WeekLow}\`\n` +
-    `• P/E Ratio – \`${data.PE}\`\n` +
-    `• EPS – \`${data.EPS}\`\n` +
-    `• Market Cap – \`${data.MarketCap} BDT\`\n` +
-    `• NAV – \`${data.NAV}\`\n` +
-    `• Suggestion below ⬇️`
-  );
-}
-
-async function getAISuggestionForStock(ticker, data) {
-  const prompt = `Give a concise buy/sell/hold suggestion for the Bangladeshi stock "${ticker}" with this data: Price=${data.LTP}, P/E=${data.PE}, EPS=${data.EPS}, Volume=${data.Volume}, 52WHigh=${data.WeekHigh}, 52WLow=${data.WeekLow}. Keep it under 40 words.`;
-
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4',
-    messages: [{ role: 'user', content: prompt }],
-    max_tokens: 60,
-  });
-
-  return `🤖 **AI Suggestion:** ${response.choices[0].message.content}`;
-}
-
-async function postStockUpdate() {
-  const { gainers, losers, allStocks } = await fetchTopMovers();
-  const favorites = filterFavoriteStocks(allStocks);
-
-  let updateChannel, suggestionChannel;
-  try {
-    updateChannel = await client.channels.fetch(process.env.CHANNEL_ID);
-    suggestionChannel = await client.channels.fetch(process.env.SUGGESTION_CHANNEL_ID);
-  } catch (e) {
-    console.error("❌ Channel fetch failed:", e);
-    return;
-  }
+// Stock update logic
+async function fetchStockUpdates() {
+  const updateCh = await client.channels.fetch(CHANNEL_ID);
+  const suggestCh = await client.channels.fetch(SUGGESTION_CHANNEL_ID);
+  const alertCh = await client.channels.fetch(EMERGENCY_CHANNEL_ID);
 
   const now = new Date().toLocaleTimeString('en-BD', {
-    timeZone: 'Asia/Dhaka',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
+    timeZone: 'Asia/Dhaka', hour12: true
   });
 
-  const stockMessage = [
-    `🕒 **Updated at:** ${now} (BST)`,
-    formatStockMessage(gainers, "Top Gainers", "🚀"),
-    formatStockMessage(losers, "Top Losers", "📉"),
-    formatStockMessage(favorites, "Favorite Stocks", "⭐")
-  ].join('\n\n');
+  for (const ticker of favoriteStocks) {
+    const data = await fetchStockDetails(ticker);
+    if (!data) continue;
 
-  try {
-    await updateChannel.send(stockMessage);
-    const suggestionMsg = generateAISuggestions(gainers, losers);
-    if (suggestionChannel && suggestionChannel.isTextBased()) {
-      await suggestionChannel.send(suggestionMsg);
+    const msg = `📊 **${data.name} (${data.symbol})**
+🔹 Price: $${data.price}
+🔹 Open: $${data.open}
+🔹 High/Low: $${data.high} / $${data.low}
+🔹 Change: ${data.change} (${data.percent_change}%)
+🕒 ${now} (BST)`;
+
+    await updateCh.send(msg);
+
+    // Emergency alert if threshold hit
+    const changePercent = parseFloat(data.percent_change);
+    if (!isNaN(changePercent) && Math.abs(changePercent) >= threshold) {
+      await alertCh.send(`🚨 **ALERT:** ${data.symbol} moved ${changePercent}%!`);
     }
-  } catch (e) {
-    console.error("❌ Failed to send messages:", e);
+
+    // AI Suggestion
+    try {
+      const aiResponse = await openai.createChatCompletion({
+        model: "gpt-4",
+        messages: [
+          { role: "system", content: "You're a stock analyst. Give a short Bangladeshi-style recommendation." },
+          { role: "user", content: `Stock: ${data.symbol}, Price: ${data.price}, Change: ${data.change}, Percent Change: ${data.percent_change}` }
+        ],
+        max_tokens: 60
+      });
+
+      const suggestion = aiResponse.data.choices[0].message.content;
+      await suggestCh.send(`🤖 AI Suggestion for **${data.symbol}**:\n${suggestion}`);
+    } catch (e) {
+      console.error("❌ OpenAI error:", e.message);
+    }
   }
 }
 
-client.on('messageCreate', async message => {
-  if (!message.content.startsWith('!stock')) return;
+// Command listener
+client.on('messageCreate', async msg => {
+  if (!msg.content.startsWith('!stock ') || msg.author.bot) return;
 
-  const parts = message.content.split(' ');
-  if (parts.length !== 2) {
-    return message.reply("⚠️ Usage: `!stock [TICKER]`");
-  }
+  const ticker = msg.content.split(' ')[1]?.toUpperCase();
+  if (!ticker) return msg.reply('⚠️ Usage: `!stock <TICKER>`');
 
-  const ticker = parts[1].toUpperCase();
   const data = await fetchStockDetails(ticker);
-  if (!data) {
-    return message.reply(`❌ Could not find data for \`${ticker}\`.`);
-  }
+  if (!data) return msg.reply(`❌ Could not find data for \`${ticker}\`.`);
 
-  const details = formatStockDetails(data);
-  const aiAdvice = await getAISuggestionForStock(ticker, data);
-  await message.channel.send(`${details}\n\n${aiAdvice}`);
+  const info = `📌 **${data.name} (${ticker})**
+• Price – $${data.price}
+• Open – $${data.open}
+• High/Low – $${data.high} / $${data.low}
+• Volume – ${data.volume}
+• Change – ${data.change} (${data.percent_change}%)`;
+
+  const aiPrompt = `Should I buy/sell/hold ${ticker}? Price: ${data.price}, Change: ${data.change}, Percent: ${data.percent_change}`;
+
+  try {
+    const ai = await openai.createChatCompletion({
+      model: "gpt-4",
+      messages: [
+        { role: "user", content: aiPrompt }
+      ],
+      max_tokens: 60
+    });
+    await msg.channel.send(`${info}\n\n🤖 **AI Suggestion:** ${ai.data.choices[0].message.content}`);
+  } catch (err) {
+    await msg.channel.send(`${info}\n\n⚠️ AI Suggestion unavailable.`);
+  }
 });
 
+// Bot start
 client.once('ready', () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  postStockUpdate();
-  setInterval(postStockUpdate, 5 * 60 * 1000); // every 5 mins
+  fetchStockUpdates();
+  setInterval(fetchStockUpdates, 5 * 60 * 1000); // Every 5 mins
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(DISCORD_TOKEN);
